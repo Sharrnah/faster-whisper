@@ -11,7 +11,7 @@ import ctranslate2
 import numpy as np
 import tokenizers
 
-from faster_whisper.audio import decode_audio
+from faster_whisper.audio import decode_audio, pad_or_trim
 from faster_whisper.feature_extractor import FeatureExtractor
 from faster_whisper.tokenizer import _LANGUAGE_CODES, Tokenizer
 from faster_whisper.utils import download_model, format_timestamp, get_end, get_logger
@@ -452,8 +452,7 @@ class WhisperModel:
 
         idx = 0
         clip_idx = 0
-        #seek = seek_clips[clip_idx][0]
-        seek = 0
+        seek = seek_clips[clip_idx][0]
         all_tokens = []
         prompt_reset_since = 0
 
@@ -470,40 +469,30 @@ class WhisperModel:
         # A later commit should turn this into a simpler nested loop.
         # for seek_clip_start, seek_clip_end in seek_clips:
         #     while seek < seek_clip_end
-        while seek < content_frames:
+        while clip_idx < len(seek_clips):
+            seek_clip_start, seek_clip_end = seek_clips[clip_idx]
+            if seek_clip_end > content_frames:
+                seek_clip_end = content_frames
+            if seek < seek_clip_start:
+                seek = seek_clip_start
+            if seek >= seek_clip_end:
+                clip_idx += 1
+                if clip_idx < len(seek_clips):
+                    seek = seek_clips[clip_idx][0]
+                continue
             time_offset = seek * self.feature_extractor.time_per_frame
-            segment = features[:, seek : seek + self.feature_extractor.nb_max_frames]
-            segment_size = min(
-                self.feature_extractor.nb_max_frames, content_frames - seek
+            window_end_time = float(
+                (seek + self.feature_extractor.nb_max_frames)
+                * self.feature_extractor.time_per_frame
             )
+            segment_size = min(
+                self.feature_extractor.nb_max_frames,
+                content_frames - seek,
+                seek_clip_end - seek,
+            )
+            segment = features[:, seek : seek + segment_size]
             segment_duration = segment_size * self.feature_extractor.time_per_frame
-
-
-
-
-        #while clip_idx < len(seek_clips):
-        #    seek_clip_start, seek_clip_end = seek_clips[clip_idx]
-        #    if seek_clip_end > content_frames:
-        #        seek_clip_end = content_frames
-        #    if seek < seek_clip_start:
-        #        seek = seek_clip_start
-        #    if seek >= seek_clip_end:
-        #        clip_idx += 1
-        #        if clip_idx < len(seek_clips):
-        #            seek = seek_clips[clip_idx][0]
-        #        continue
-        #    time_offset = seek * self.feature_extractor.time_per_frame
-        #    window_end_time = float(
-        #        (seek + self.feature_extractor.nb_max_frames)
-        #        * self.feature_extractor.time_per_frame
-        #    )
-        #    segment_size = min(
-        #        self.feature_extractor.nb_max_frames,
-        #        content_frames - seek,
-        #        seek_clip_end - seek,
-        #    )
-        #    segment = features[:, seek : seek + segment_size]
-        #    segment_duration = segment_size * self.feature_extractor.time_per_frame
+            segment = pad_or_trim(segment, self.feature_extractor.nb_max_frames)
 
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
@@ -581,11 +570,7 @@ class WhisperModel:
 
             single_timestamp_ending = (
                 len(tokens) >= 2
-
-                and tokens[-2] < tokenizer.timestamp_begin
-                and tokens[-1] >= tokenizer.timestamp_begin
-
-                #and tokens[-2] < tokenizer.timestamp_begin <= tokens[-1]
+                and tokens[-2] < tokenizer.timestamp_begin <= tokens[-1]
             )
 
             consecutive_timestamps = [
@@ -967,7 +952,7 @@ class WhisperModel:
         word_durations = np.array([word["end"] - word["start"] for word in alignment])
         word_durations = word_durations[word_durations.nonzero()]
         median_duration = np.median(word_durations) if len(word_durations) > 0 else 0.0
-        #median_duration = min(0.7, float(median_duration))
+        median_duration = min(0.7, float(median_duration))
         max_duration = median_duration * 2
 
         # hack: truncate long words at sentence boundaries.
